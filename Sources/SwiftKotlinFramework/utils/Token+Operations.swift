@@ -52,13 +52,20 @@ extension Array where Iterator.Element == Token {
     }
 
     func lineIndentationToken(at index: Int) -> Token? {
-        guard let firstIndentation = indexOf(kind: .indentation, before: index) else { return nil }
-
-        if let firstLineBreak = indexOf(kind: .linebreak, before: index), firstIndentation < firstLineBreak {
-            return nil
+        var indentation: Token?
+        var position = index
+        while position >= 0 {
+            let token = self[position]            
+            if token.kind == .indentation, let node = token.node {
+                let accumulatedIndentation = (indentation?.value ?? "") + token.value
+                indentation = node.newToken(.indentation, accumulatedIndentation)
+            }
+            if token.kind == .linebreak {
+                return indentation
+            }
+            position -= 1
         }
-
-        return self[firstIndentation]
+        return indentation
     }
 
     func indexOf(kind: Token.Kind, before: Int) -> Int? {
@@ -101,6 +108,22 @@ extension Array where Iterator.Element == Token {
         return tokens
     }
 
+    public func tokensOnScope(depth: Int) -> [Token] {
+        var tokens = [Token]()
+        var scope = 0
+        for token in self {
+            if token.kind == .endOfScope {
+                scope -= 1
+            }
+            if scope == depth {
+                tokens.append(token)
+            }
+            if token.kind == .startOfScope {
+                scope += 1
+            }
+        }
+        return tokens
+    }
 }
 
 extension ASTTokenizable {

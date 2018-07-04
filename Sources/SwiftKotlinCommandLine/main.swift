@@ -12,10 +12,11 @@ import SwiftKotlinFramework
 let kotlinTokenizer = KotlinTokenizer(
     tokenTransformPlugins: [
         XCTTestToJUnitTokenTransformPlugin(),
-        FoundationMethodsTransformPlugin()
+        FoundationMethodsTransformPlugin(),
+        CommentsAdditionTransformPlugin()
     ]
 )
-let version = "0.1.3"
+let version = "0.1.4"
 let arguments = [
     "output",
     "help",
@@ -25,7 +26,7 @@ let arguments = [
 
 func showHelp() {
     print("swiftkotlin, version \(version)")
-    print("copyright (c) 2017 Angel G. Olloqui")
+    print("copyright (c) 2018 Angel G. Olloqui")
     print("")
     print("usage: swiftkotlin [<file>] [--output path]")
     print("")
