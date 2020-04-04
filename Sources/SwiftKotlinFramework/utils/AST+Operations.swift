@@ -31,11 +31,19 @@ extension VariableDeclaration {
     var isLazy: Bool {
         return modifiers.isLazy
     }
-    
+
+    var isPrivateSet: Bool {
+        return modifiers.isPrivateSet
+    }
+
+    var isProtectedSet: Bool {
+        return modifiers.isProtectedSet
+    }
+
     var typeAnnotation: TypeAnnotation? {
         return initializerList?
-            .flatMap { $0.pattern as? IdentifierPattern }
-            .flatMap { $0.typeAnnotation }
+            .compactMap { $0.pattern as? IdentifierPattern }
+            .compactMap { $0.typeAnnotation }
             .first
     }
     
@@ -53,6 +61,9 @@ extension VariableDeclaration {
 extension FunctionDeclaration {
     var isStatic: Bool {
         return modifiers.isStatic
+    }
+    var isOverride: Bool {
+        return modifiers.isOverride
     }
 }
 
@@ -118,6 +129,18 @@ extension Collection where Iterator.Element == DeclarationModifier {
     var isLazy: Bool {
         return self.contains(where: { $0.isLazy })
     }
+
+    var isPrivateSet: Bool {
+        return self.contains(where: { $0.isPrivateSet })
+    }
+
+    var isProtectedSet: Bool {
+        return self.contains(where: { $0.isProtectedSet })
+    }
+
+    var isOverride: Bool {
+        return self.contains(where: { $0.isOverride })
+    }
 }
 
 extension DeclarationModifier {
@@ -131,6 +154,29 @@ extension DeclarationModifier {
     var isLazy: Bool {
         switch self {
         case .lazy: return true
+        default: return false
+        }
+    }
+
+    var isOverride: Bool {
+        switch self {
+        case .override: return true
+        default: return false
+        }
+    }
+
+    var isPrivateSet: Bool {
+        switch self {
+        case .accessLevel(let modifier):
+            return modifier == .fileprivateSet || modifier == .privateSet
+        default: return false
+        }
+    }
+
+    var isProtectedSet: Bool {
+        switch self {
+        case .accessLevel(let modifier):
+            return modifier == .openSet || modifier == .internalSet
         default: return false
         }
     }
@@ -164,11 +210,11 @@ extension ExplicitMemberExpression {
         case let .tuple(_, index):
             return "var\(index)"
         case let .namedType(_, identifier):
-            return identifier
+            return identifier.textDescription
         case let .generic(_, identifier, _):
-            return identifier
+            return identifier.textDescription
         case let .argument(_, identifier, _):
-            return identifier
+            return identifier.textDescription
         }
     }
 }
@@ -227,3 +273,20 @@ extension GuardStatement {
             (bodyStatement is ReturnStatement || bodyStatement is ThrowStatement)
     }
 }
+
+extension TypeInheritanceClause {
+    var nonEquatable: TypeInheritanceClause? {
+        let typeInheritanceList = self.typeInheritanceList.nonEquatable
+        if typeInheritanceList.isEmpty {
+            return nil
+        }
+        return TypeInheritanceClause(classRequirement: classRequirement, typeInheritanceList: typeInheritanceList)
+    }
+}
+
+extension Collection where Iterator.Element == TypeIdentifier {
+    var nonEquatable: [TypeIdentifier] {
+        return filter { $0.names.contains { $0.name.textDescription != "Equatable" } }
+    }
+}
+

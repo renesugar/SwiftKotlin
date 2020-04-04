@@ -21,7 +21,7 @@ public class KotlinTokenizer: SwiftTokenizer {
             .replacing({ $0.value == "let"},
                        with: [constant.newToken(.keyword, "val")])
     }
-
+    
     open override func tokenize(_ declaration: FunctionDeclaration) -> [Token] {
         let attrsTokens = tokenize(declaration.attributes, node: declaration)
         let modifierTokens = declaration.modifiers.map { tokenize($0, node: declaration) }
@@ -35,15 +35,21 @@ public class KotlinTokenizer: SwiftTokenizer {
             genericParameterClauseTokens
         ].joined(token: declaration.newToken(.space, " "))
         
-        let signatureTokens = tokenize(declaration.signature, node: declaration)
+        var signatureTokens = tokenize(declaration.signature, node: declaration)
         let bodyTokens = declaration.body.map(tokenize) ?? []
-        
-        return [
+
+        if declaration.isOverride {
+            // overridden methods can't have default args in kotlin:
+            signatureTokens = removeDefaultArgsFromParameters(tokens:signatureTokens)
+        }
+        let tokens = [
             headTokens,
             [declaration.newToken(.identifier, declaration.name)] + signatureTokens,
             bodyTokens
         ].joined(token: declaration.newToken(.space, " "))
         .prefix(with: declaration.newToken(.linebreak, "\n"))
+        
+        return tokens
     }
 
     open override func tokenize(_ parameter: FunctionSignature.Parameter, node: ASTNode) -> [Token] {
@@ -91,7 +97,7 @@ public class KotlinTokenizer: SwiftTokenizer {
             members: declaration.members.filter({ !$0.isStatic }))
         newClass.setSourceRange(declaration.sourceRange)
         var tokens = super.tokenize(newClass)
-        if !staticMembers.isEmpty, let bodyStart = tokens.index(where: { $0.value == "{"}) {
+        if !staticMembers.isEmpty, let bodyStart = tokens.firstIndex(where: { $0.value == "{"}) {
             let companionTokens = indent(tokenizeCompanion(staticMembers, node: declaration))
                 .prefix(with: declaration.newToken(.linebreak, "\n"))
                 .suffix(with: declaration.newToken(.linebreak, "\n"))
@@ -121,7 +127,7 @@ public class KotlinTokenizer: SwiftTokenizer {
             accessLevelModifier: declaration.accessLevelModifier,
             name: declaration.name,
             genericParameterClause: declaration.genericParameterClause,
-            typeInheritanceClause: declaration.typeInheritanceClause,
+            typeInheritanceClause: nil,
             genericWhereClause: declaration.genericWhereClause,
             members: otherMembers)
         newStruct.setSourceRange(declaration.sourceRange)
@@ -130,14 +136,7 @@ public class KotlinTokenizer: SwiftTokenizer {
             .replacing({ $0.value == "struct"},
                        with: [declaration.newToken(.keyword, "data class")])
 
-        if !staticMembers.isEmpty, let bodyStart = tokens.index(where: { $0.value == "{"}) {
-            let companionTokens = indent(tokenizeCompanion(staticMembers, node: declaration))
-                .prefix(with: declaration.newToken(.linebreak, "\n"))
-                .suffix(with: declaration.newToken(.linebreak, "\n"))
-            tokens.insert(contentsOf: companionTokens, at: bodyStart + 1)
-        }
-
-        if !declarationMembers.isEmpty, let bodyStart = tokens.index(where: { $0.value == "{"}) {
+        if !declarationMembers.isEmpty, let bodyStart = tokens.firstIndex(where: { $0.value == "{"}) {
             let linebreak = declaration.newToken(.linebreak, "\n")
             let declarationTokens: [Token]
             if declarationMembers.count == 1 {
@@ -158,6 +157,21 @@ public class KotlinTokenizer: SwiftTokenizer {
                 .prefix(with: declaration.newToken(.startOfScope, "("))
                 .suffix(with: declaration.newToken(.endOfScope, ")")),
                           at: bodyStart - 1)
+        }
+
+        if let typeInheritanceList = declaration.typeInheritanceClause?.typeInheritanceList.nonEquatable,
+            typeInheritanceList.isEmpty == false,
+            let bodyStart = tokens.firstIndex(where: { $0.value == "{"}) {
+            let clause = TypeInheritanceClause(classRequirement: false, typeInheritanceList: typeInheritanceList)
+            let inheritanceTokens = tokenize(clause, node: declaration)
+            tokens.insert(contentsOf: inheritanceTokens, at: bodyStart - 1)
+        }
+
+        if !staticMembers.isEmpty, let bodyStart = tokens.firstIndex(where: { $0.value == "{"}) {
+            let companionTokens = indent(tokenizeCompanion(staticMembers, node: declaration))
+                .prefix(with: declaration.newToken(.linebreak, "\n"))
+                .suffix(with: declaration.newToken(.linebreak, "\n"))
+            tokens.insert(contentsOf: companionTokens, at: bodyStart + 1)
         }
 
         return tokens
@@ -193,21 +207,21 @@ public class KotlinTokenizer: SwiftTokenizer {
 
         // Find super.init and move to body start
         let superInitExpression = declaration.body.statements
-            .flatMap { ($0 as? FunctionCallExpression)?.postfixExpression as? SuperclassExpression }
+            .compactMap { ($0 as? FunctionCallExpression)?.postfixExpression as? SuperclassExpression }
             .filter { $0.isInitializer }
             .first
 
         let selfInitExpression = declaration.body.statements
-            .flatMap { ($0 as? FunctionCallExpression)?.postfixExpression as? SelfExpression }
+            .compactMap { ($0 as? FunctionCallExpression)?.postfixExpression as? SelfExpression }
             .filter { $0.isInitializer }
             .first
 
-        let bodyStart = tokens.index(where: { $0.node === declaration.body })
+        let bodyStart = tokens.firstIndex(where: { $0.node === declaration.body })
 
         if  let bodyStart = bodyStart,
             let initExpression: ASTNode = superInitExpression ?? selfInitExpression,
-            let superIndex = tokens.index(where: { $0.node === initExpression }),
-            let endOfScopeIndex = tokens[superIndex...].index(where: { $0.kind == .endOfScope && $0.value == ")" }){
+            let superIndex = tokens.firstIndex(where: { $0.node === initExpression }),
+            let endOfScopeIndex = tokens[superIndex...].firstIndex(where: { $0.kind == .endOfScope && $0.value == ")" }){
             let keyword = superInitExpression != nil ? "super" : "this"
             let superCallTokens = Array(tokens[superIndex...endOfScopeIndex])
                 .replacing({ $0.node === initExpression }, with: [])
@@ -228,6 +242,8 @@ public class KotlinTokenizer: SwiftTokenizer {
         switch modifier {
         case .static, .unowned, .unownedSafe, .unownedUnsafe, .weak, .convenience, .dynamic, .lazy:
             return []
+        case .accessLevel(let mod) where mod.rawValue.contains("(set)"):
+            return []
         default:
             return super.tokenize(modifier, node: node)
         }
@@ -246,9 +262,9 @@ public class KotlinTokenizer: SwiftTokenizer {
 
         let memberTokens = declaration.members.map { member in
             var tokens = tokenize(member)
-            let firstToken = tokens.index(where: { $0.kind != .linebreak }) ?? 0
+            let firstToken = tokens.firstIndex(where: { $0.kind != .linebreak }) ?? 0
             tokens.insert(contentsOf: modifierTokens, at: firstToken)
-            if let index = tokens.index(where: { $0.kind == .identifier }) {
+            if let index = tokens.firstIndex(where: { $0.kind == .identifier }) {
                 if member.isStatic {
                     tokens.insert(contentsOf: [declaration.newToken(.keyword, "Companion"), declaration.newToken(.delimiter, ".")], at: index)
                 }
@@ -299,6 +315,19 @@ public class KotlinTokenizer: SwiftTokenizer {
             }
         }
 
+        if declaration.isPrivateSet || declaration.isProtectedSet {
+            let modifierToken = declaration.newToken(.keyword, declaration.isPrivateSet ? "private" : "protected")
+            // If there is already a setter, change its accesibility
+            if let setterIndex = bodyTokens.firstIndex(where: { $0.kind == .keyword && $0.value == "set" }) {
+                bodyTokens.insert(contentsOf: [modifierToken, spaceToken], at: setterIndex)
+            } else { // Else create modified setter
+                bodyTokens.append(contentsOf:
+                    [declaration.newToken(.linebreak, "\n")] +
+                    indent([modifierToken, spaceToken, declaration.newToken(.keyword, "set")])
+                )
+            }
+        }
+
         return [
             attrsTokenGroups.joined(token: spaceToken),
             modifierTokenGroups.joined(token: spaceToken),
@@ -323,15 +352,15 @@ public class KotlinTokenizer: SwiftTokenizer {
                 )
             
         case let .willSetDidSetBlock(name, typeAnnotation, initExpr, block):
-            let newName = block.willSetClause?.name ?? "newValue"
-            let oldName = block.didSetClause?.name ?? "oldValue"
+            let newName = block.willSetClause?.name ?? .name("newValue")
+            let oldName = block.didSetClause?.name ?? .name("oldValue")
             let fieldAssignmentExpression = AssignmentOperatorExpression(
-                leftExpression: IdentifierExpression(kind: IdentifierExpression.Kind.identifier("field", nil)),
+                leftExpression: IdentifierExpression(kind: IdentifierExpression.Kind.identifier(.name("field"), nil)),
                 rightExpression: IdentifierExpression(kind: IdentifierExpression.Kind.identifier(newName, nil))
             )
             let oldValueAssignmentExpression = ConstantDeclaration(initializerList: [
                 PatternInitializer(pattern: IdentifierPattern(identifier: oldName),
-                                   initializerExpression: IdentifierExpression(kind: IdentifierExpression.Kind.identifier("field", nil)))
+                                   initializerExpression: IdentifierExpression(kind: IdentifierExpression.Kind.identifier(.name("field"), nil)))
             ])
             let setterCodeBlock = CodeBlock(statements:
                     (block.didSetClause?.codeBlock.statements.count ?? 0 > 0 ? [oldValueAssignmentExpression] : []) +
@@ -368,13 +397,13 @@ public class KotlinTokenizer: SwiftTokenizer {
     open override func tokenize(_ block: GetterSetterBlock.SetterClause, node: ASTNode) -> [Token] {
         let newSetter = GetterSetterBlock.SetterClause(attributes: block.attributes,
                                                        mutationModifier: block.mutationModifier,
-                                                       name: block.name ?? "newValue",
+                                                       name: block.name ?? .name("newValue"),
                                                        codeBlock: block.codeBlock)        
         return super.tokenize(newSetter, node: node)
     }
 
     open override func tokenize(_ block: WillSetDidSetBlock, node: ASTNode) -> [Token] {
-        let name = block.willSetClause?.name ?? block.didSetClause?.name ?? "newValue"
+        let name = block.willSetClause?.name ?? block.didSetClause?.name ?? .name("newValue")
         let willSetBlock = block.willSetClause.map { tokenize($0.codeBlock) }?.tokensOnScope(depth: 1) ?? []
         let didSetBlock = block.didSetClause.map { tokenize($0.codeBlock) }?.tokensOnScope(depth: 1) ?? []
         let assignmentBlock = [
@@ -397,83 +426,30 @@ public class KotlinTokenizer: SwiftTokenizer {
     }
     
     open override func tokenize(_ declaration: EnumDeclaration) -> [Token] {
-        let unionCases = declaration.members.flatMap { $0.unionStyleEnumCase }
+        let unionCases = declaration.members.compactMap { $0.unionStyleEnumCase }
         let simpleCases = unionCases.flatMap { $0.cases }
         let lineBreak = declaration.newToken(.linebreak, "\n")
-        let space = declaration.newToken(.space, " ")
 
-        guard unionCases.count == declaration.members.count &&
+        guard unionCases.count <= declaration.members.count && // unionCases is 0 when enums have specific values
             declaration.genericParameterClause == nil &&
             declaration.genericWhereClause == nil else {
                 return self.unsupportedTokens(message: "Complex enums not supported yet", element: declaration, node: declaration).suffix(with: lineBreak) +
                     super.tokenize(declaration)
         }
 
-        // Simple enums (no tuples)
-        if !simpleCases.contains(where: { $0.tuple != nil }) && declaration.typeInheritanceClause == nil {
-            let attrsTokens = tokenize(declaration.attributes, node: declaration)
-            let modifierTokens = declaration.accessLevelModifier.map { tokenize($0, node: declaration) } ?? []
-            let headTokens = [
-                attrsTokens,
-                modifierTokens,
-                [declaration.newToken(.keyword, "enum")],
-                [declaration.newToken(.keyword, "class")],
-                [declaration.newToken(.identifier, declaration.name)],
-                ].joined(token: space)
-
-            let membersTokens = simpleCases.map { c in
-                return [c.newToken(.identifier, c.name, declaration)]
-                }.joined(tokens: [
-                    declaration.newToken(.delimiter, ","),
-                    lineBreak
-                    ])
-
-            return headTokens +
-                [space, declaration.newToken(.startOfScope, "{"), lineBreak] +
-                indent(membersTokens) +
-                [lineBreak, declaration.newToken(.endOfScope, "}")]
+        // Simple enums (no tuple values)
+        if !simpleCases.contains(where: { $0.tuple != nil }) {
+            let typeInheritanceList = declaration.typeInheritanceClause?.typeInheritanceList.nonEquatable
+            if typeInheritanceList?.isEmpty == false {
+                return tokenizeSimpleValueEnum(declaration: declaration, simpleCases: simpleCases)
+            } else {
+                return tokenizeNoValueEnum(declaration: declaration, simpleCases: simpleCases)
+            }
         }
         // Tuples or inhertance required sealed classes
         else {
-            let attrsTokens = tokenize(declaration.attributes, node: declaration)
-            let modifierTokens = declaration.accessLevelModifier.map { tokenize($0, node: declaration) } ?? []
-            let inheritanceTokens = declaration.typeInheritanceClause.map { tokenize($0, node: declaration) } ?? []
-            let headTokens = [
-                attrsTokens,
-                modifierTokens,
-                [declaration.newToken(.keyword, "sealed")],
-                [declaration.newToken(.keyword, "class")],
-                [declaration.newToken(.identifier, declaration.name)],
-                inheritanceTokens
-            ].joined(token: space)
-
-            let membersTokens = simpleCases.map { c in
-                var tokenSections: [[Token]]
-                if let tuple = c.tuple {
-                    tokenSections = [
-                        [c.newToken(.keyword, "data", declaration)],
-                        [c.newToken(.keyword, "class", declaration)],
-                        [c.newToken(.identifier, c.name, declaration)] + tokenize(tuple, node: declaration)
-                    ]
-                } else {
-                    tokenSections = [
-                        [c.newToken(.keyword, "object", declaration)],
-                        [c.newToken(.identifier, c.name, declaration)]
-                    ]
-                }
-                tokenSections += [
-                    [c.newToken(.symbol, ":", declaration)],
-                    [c.newToken(.identifier, declaration.name, declaration), c.newToken(.startOfScope, "(", declaration), c.newToken(.endOfScope, ")", declaration)]
-                ]
-                return tokenSections.joined(token: space)
-            }.joined(token: lineBreak)
-
-            return headTokens +
-                [space, declaration.newToken(.startOfScope, "{"), lineBreak] +
-                indent(membersTokens) +
-                [lineBreak, declaration.newToken(.endOfScope, "}")]
+            return tokenizeSealedClassEnum(declaration: declaration, simpleCases: simpleCases)
         }
-
     }
     
     open override func tokenize(_ codeBlock: CodeBlock) -> [Token] {
@@ -545,7 +521,6 @@ public class KotlinTokenizer: SwiftTokenizer {
         ]
         switch statement {
         case let .case(itemList, stmts):
-            let prefix = itemList.count > 1 ? [statement.newToken(.keyword, "in", node), statement.newToken(.space, " ", node)] : []
             let conditions = itemList.map { tokenize($0, node: node) }.joined(token: statement.newToken(.delimiter, ", ", node))
             var statements = tokenize(stmts, node: node)
             if stmts.count > 1 || statements.filter({ $0.kind == .linebreak }).count > 1 {
@@ -554,7 +529,7 @@ public class KotlinTokenizer: SwiftTokenizer {
                     indent(statements) +
                     [linebreak, statement.newToken(.endOfScope, "}", node)]
             }
-            return prefix + conditions + separatorTokens + statements
+            return conditions + separatorTokens + statements
 
         case .default(let stmts):
             return
@@ -565,21 +540,38 @@ public class KotlinTokenizer: SwiftTokenizer {
     }
 
     open override func tokenize(_ statement: SwitchStatement.Case.Item, node: ASTNode) -> [Token] {
-        guard let enumCasePattern = statement.pattern as? EnumCasePattern else {
-            return super.tokenize(statement, node: node)
+        let prefix: [Token]
+        if let expression = (statement.pattern as? ExpressionPattern)?.expression {
+            prefix = !(expression is LiteralExpression) ? [statement.newToken(.keyword, "in", node)] : []
+        } else {
+            prefix = []
         }
-        let patternWithoutTuple = EnumCasePattern(typeIdentifier: enumCasePattern.typeIdentifier, name: enumCasePattern.name, tuplePattern: nil)
         return [
-            tokenize(patternWithoutTuple, node: node),
-            statement.whereExpression.map { _ in [statement.newToken(.keyword, "where", node)] } ?? [],
-            statement.whereExpression.map { tokenize($0) } ?? []
-            ].joined(token: statement.newToken(.space, " ", node))
+            prefix,
+            super.tokenize(statement, node: node)
+        ].joined(token: statement.newToken(.space, " ", node))
     }
 
+    open override func tokenize(_ pattern: EnumCasePattern, node: ASTNode) -> [Token] {
+        let patternWithoutTuple: EnumCasePattern
+        let prefix: [Token]
+        if pattern.tuplePattern != nil {
+            patternWithoutTuple = EnumCasePattern(typeIdentifier: pattern.typeIdentifier, name: pattern.name, tuplePattern: nil)
+            prefix = [pattern.newToken(.keyword, "is", node), pattern.newToken(.space, " ", node)]
+        } else {
+            patternWithoutTuple = pattern
+            prefix = []
+        }
+        var tokens = super.tokenize(patternWithoutTuple, node: node)
+        if tokens.first?.value == "." {
+            tokens.remove(at: 0)
+        }
+        return prefix + tokens
+    }
 
     open override func tokenize(_ statement: ForInStatement) -> [Token] {
         var tokens = super.tokenize(statement)
-        if let endIndex = tokens.index(where: { $0.value == "{"}) {
+        if let endIndex = tokens.firstIndex(where: { $0.value == "{"}) {
             tokens.insert(statement.newToken(.endOfScope, ")"), at: endIndex - 1)
             tokens.insert(statement.newToken(.startOfScope, "("), at: 2)
         }
@@ -618,19 +610,24 @@ public class KotlinTokenizer: SwiftTokenizer {
             return [expression.newToken(.keyword, "null")]
         case let .interpolatedString(_, rawText):
             return tokenizeInterpolatedString(rawText, node: expression)
+        case let .staticString(_, rawText):
+            return [expression.newToken(.string, conversionUnicodeString(rawText, node: expression))]
         case .array(let exprs):
-            return
-                expression.newToken(.identifier, "listOf") +
-                expression.newToken(.startOfScope, "(") +
+            let isGenericTypeInfo = (expression.lexicalParent as? FunctionCallExpression)?.postfixExpression.textDescription.starts(with: "[") == true
+            return expression.newToken(.identifier, "listOf") +
+                expression.newToken(.startOfScope, isGenericTypeInfo ? "<" : "(") +
                 exprs.map { tokenize($0) }.joined(token: expression.newToken(.delimiter, ", ")) +
-                expression.newToken(.endOfScope, ")")
+                expression.newToken(.endOfScope, isGenericTypeInfo ? ">" : ")")
         case .dictionary(let entries):
-            return
-                expression.newToken(.identifier, "mapOf") +
-                expression.newToken(.startOfScope, "(") +
-                entries.map { tokenize($0, node: expression) }
-                    .joined(token: expression.newToken(.delimiter, ", ")) +
-                expression.newToken(.endOfScope, ")")
+            let isGenericTypeInfo = expression.lexicalParent is FunctionCallExpression
+            var entryTokens = entries.map { tokenize($0, node: expression) }.joined(token: expression.newToken(.delimiter, ", "))
+            if isGenericTypeInfo {
+                entryTokens = entryTokens.replacing({ $0.value == "to"}, with: [expression.newToken(.delimiter, ",") ])
+            }
+            return [expression.newToken(.identifier, "mapOf"),
+                expression.newToken(.startOfScope, isGenericTypeInfo ? "<" : "(")] +
+                entryTokens +
+                [expression.newToken(.endOfScope, isGenericTypeInfo ? ">" : ")")]
         default:
             return super.tokenize(expression)
         }
@@ -702,7 +699,7 @@ public class KotlinTokenizer: SwiftTokenizer {
         
         // Last return can be removed
         if let lastReturn = expression.statements?.last as? ReturnStatement,
-            let index = tokens.index(where: { $0.node === lastReturn && $0.value == "return" }) {
+            let index = tokens.firstIndex(where: { $0.node === lastReturn && $0.value == "return" }) {
             tokens.remove(at: index)
             tokens.remove(at: index)
         }
@@ -710,7 +707,7 @@ public class KotlinTokenizer: SwiftTokenizer {
         // Other returns must be suffixed with call name
         if let callExpression = expression.lexicalParent as? FunctionCallExpression,
             let memberExpression = callExpression.postfixExpression as? ExplicitMemberExpression {
-            while let returnIndex = tokens.index(where: { $0.value == "return" }) {
+            while let returnIndex = tokens.firstIndex(where: { $0.value == "return" }) {
                 tokens.remove(at: returnIndex)
                 tokens.insert(expression.newToken(.keyword, "return@"), at: returnIndex)
                 tokens.insert(expression.newToken(.identifier, memberExpression.identifier), at: returnIndex + 1)
@@ -791,9 +788,9 @@ public class KotlinTokenizer: SwiftTokenizer {
         var elementTokens = expression.elements.map({ tokenize($0, node: expression) })
 
         //If there is a ternary, then prefix with if
-        if let ternaryOperatorIndex = expression.elements.index(where: { $0.isTernaryConditionalOperator }),
+        if let ternaryOperatorIndex = expression.elements.firstIndex(where: { $0.isTernaryConditionalOperator }),
             ternaryOperatorIndex > 0 {
-            let assignmentIndex = expression.elements.index(where: { $0.isAssignmentOperator }) ?? -1
+            let assignmentIndex = expression.elements.firstIndex(where: { $0.isAssignmentOperator }) ?? -1
             let prefixTokens = [
                 expression.newToken(.keyword, "if"),
                 expression.newToken(.space, " "),
@@ -827,6 +824,20 @@ public class KotlinTokenizer: SwiftTokenizer {
         }
         return tokens
     }
+
+    open override func tokenize(_ expression: TypeCastingOperatorExpression) -> [Token] {
+        switch expression.kind {
+        case let .forcedCast(expr, type):
+            return [
+                tokenize(expr),
+                [expression.newToken(.keyword, "as")],
+                tokenize(type, node: expression)
+            ].joined(token: expression.newToken(.space, " "))
+        default:
+            return super.tokenize(expression)
+        }
+    }
+
     
     // MARK: - Types
     open override func tokenize(_ type: ArrayType, node: ASTNode) -> [Token] {
@@ -859,7 +870,7 @@ public class KotlinTokenizer: SwiftTokenizer {
             "Bool": "Boolean",
             "AnyObject": "Any"
         ]
-        return type.newToken(.identifier, typeMap[type.name] ?? type.name, node) +
+        return type.newToken(.identifier, typeMap[type.name.textDescription] ?? type.name.textDescription, node) +
             type.genericArgumentClause.map { tokenize($0, node: node) }
     }
 
@@ -868,7 +879,7 @@ public class KotlinTokenizer: SwiftTokenizer {
     }
 
     open override func tokenize(_ attribute: Attribute, node: ASTNode) -> [Token] {
-        if ["escaping", "autoclosure", "discardableResult"].contains(attribute.name) {
+        if ["escaping", "autoclosure", "discardableResult"].contains(attribute.name.textDescription) {
             return []
         }
         return super.tokenize(attribute, node: node)
@@ -881,7 +892,7 @@ public class KotlinTokenizer: SwiftTokenizer {
             if element.name != nil || element.type is FunctionType {
                 typeWithNames.append(element)
             } else {
-                typeWithNames.append(TupleType.Element(type: element.type, name: "v\(index + 1)", attributes: element.attributes, isInOutParameter: element.isInOutParameter))
+                typeWithNames.append(TupleType.Element(type: element.type, name: .name("v\(index + 1)"), attributes: element.attributes, isInOutParameter: element.isInOutParameter))
             }
         }
         return type.newToken(.startOfScope, "(", node) +
@@ -971,56 +982,60 @@ public class KotlinTokenizer: SwiftTokenizer {
 
     private func tokenize(_ condition: InvertedCondition, node: ASTNode) -> [Token] {
         let tokens = tokenize(condition.condition, node: node)
-        var invertedTokens = [Token]()
-        var inverted = false
-        var lastExpressionIndex = 0
-        for token in tokens {
-            if let origin = token.origin, let node = token.node {
-                if origin is SequenceExpression || origin is BinaryExpression || origin is Condition {
-                    let inversionMap = [
-                        "==": "!=",
-                        "!=": "==",
-                        ">": "<=",
-                        ">=": "<",
-                        "<": ">=",
-                        "<=": ">",
-                        "is": "!is",
-                    ]
-                    if let newValue = inversionMap[token.value] {
-                        inverted = true
-                        invertedTokens.append(origin.newToken(token.kind, newValue, node))
-                        continue
-                    } else if token.value == "&&" || token.value == "||" {
-                        if !inverted {
-                            invertedTokens.insert(origin.newToken(.symbol, "!", node), at: lastExpressionIndex)
+        if case Condition.expression(let expression) = condition.condition, expression is ParenthesizedExpression {
+            return tokens.prefix(with: condition.condition.newToken(.symbol, "!", node))
+        } else {
+            var invertedTokens = [Token]()
+            var inverted = false
+            var lastExpressionIndex = 0
+            for token in tokens {
+                if let origin = token.origin, let node = token.node {
+                    if origin is SequenceExpression || origin is BinaryExpression || origin is Condition {
+                        let inversionMap = [
+                            "==": "!=",
+                            "!=": "==",
+                            ">": "<=",
+                            ">=": "<",
+                            "<": ">=",
+                            "<=": ">",
+                            "is": "!is",
+                        ]
+                        if let newValue = inversionMap[token.value] {
+                            inverted = true
+                            invertedTokens.append(origin.newToken(token.kind, newValue, node))
+                            continue
+                        } else if token.value == "&&" || token.value == "||" {
+                            if !inverted {
+                                invertedTokens.insert(origin.newToken(.symbol, "!", node), at: lastExpressionIndex)
+                            }
+                            inverted = false
+                            invertedTokens.append(origin.newToken(token.kind, token.value == "&&" ? "||" : "&&", node))
+                            lastExpressionIndex = invertedTokens.count + 1
+                            continue
                         }
-                        inverted = false
-                        invertedTokens.append(origin.newToken(token.kind, token.value == "&&" ? "||" : "&&", node))
-                        lastExpressionIndex = invertedTokens.count + 1
-                        continue
-                    }
-                } else if origin is PrefixOperatorExpression {
-                    if token.value == "!" {
-                        inverted = true
-                        continue
+                    } else if origin is PrefixOperatorExpression {
+                        if token.value == "!" {
+                            inverted = true
+                            continue
+                        }
                     }
                 }
+                invertedTokens.append(token)
             }
-            invertedTokens.append(token)
+            if !inverted {
+                invertedTokens.insert(condition.newToken(.symbol, "!", node), at: lastExpressionIndex)
+            }
+            return invertedTokens
         }
-        if !inverted {
-            invertedTokens.insert(condition.newToken(.symbol, "!", node), at: lastExpressionIndex)
-        }
-        return invertedTokens
     }
 
 
     private func tokenizeCompanion(_ members: [StructDeclaration.Member], node: ASTNode) -> [Token] {
-        return tokenizeCompanion(members.flatMap { $0.declaration }, node: node)
+        return tokenizeCompanion(members.compactMap { $0.declaration }, node: node)
     }
 
     private func tokenizeCompanion(_ members: [ClassDeclaration.Member], node: ASTNode) -> [Token] {
-        return tokenizeCompanion(members.flatMap { $0.declaration }, node: node)
+        return tokenizeCompanion(members.compactMap { $0.declaration }, node: node)
     }
 
     private func tokenizeCompanion(_ members: [Declaration], node: ASTNode) -> [Token] {
@@ -1042,8 +1057,35 @@ public class KotlinTokenizer: SwiftTokenizer {
         ].joined(token: node.newToken(.linebreak, "\n"))
     }
 
-    private func tokenizeInterpolatedString(_ rawText: String, node: ASTNode) -> [Token] {
+    private func conversionUnicodeString(_ rawText:String, node:ASTNode) -> String {
         var remainingText = rawText
+        var unicodeString = ""
+
+        while let startRange = remainingText.range(of: "u{") {
+            unicodeString += remainingText[..<startRange.lowerBound] + "u"
+            remainingText = String(remainingText[startRange.upperBound...])
+
+            var scopes = 1
+            var i = 1
+            while i < remainingText.count && scopes > 0 {
+                let index = remainingText.index(remainingText.startIndex, offsetBy: i)
+                i += 1
+                switch remainingText[index] {
+                case "}": scopes -= 1
+                default: continue
+                }
+            }
+
+            unicodeString += remainingText[..<remainingText.index(remainingText.startIndex, offsetBy: i - 1)]
+            remainingText = String(remainingText[remainingText.index(remainingText.startIndex, offsetBy: i)...])
+        }
+
+        unicodeString += remainingText
+        return unicodeString
+    }
+
+    private func tokenizeInterpolatedString(_ rawText: String, node: ASTNode) -> [Token] {
+        var remainingText = conversionUnicodeString(rawText, node: node)
         var interpolatedString = ""
 
         while let startRange = remainingText.range(of: "\\(") {
@@ -1071,10 +1113,40 @@ public class KotlinTokenizer: SwiftTokenizer {
         interpolatedString += remainingText
         return [node.newToken(.string, interpolatedString)]
     }
+
+    // function used to remove default arguments from override functions, since kotlin doesn't have them
+    private func removeDefaultArgsFromParameters(tokens:[Token]) -> [Token] {
+        var newTokens = [Token]()
+        var removing = false
+        var bracket = false
+        for t in tokens {
+            if removing && t.kind == .startOfScope && t.value == "(" {
+                bracket = true
+            }
+            if bracket && t.kind == .endOfScope && t.value == ")" {
+                bracket = false
+                removing = false
+                continue
+            }
+            if t.kind == .symbol && (t.value.contains("=")) {
+                removing = true
+            }
+            if t.kind == .delimiter && t.value.contains(",") {
+                removing = false
+            }
+            if !bracket && removing && t.kind == .endOfScope && t.value == ")" {
+                removing = false
+            }
+            if !removing {
+                newTokens.append(t)
+            }
+        }
+        return newTokens
+    }
+    
 }
 
 public typealias InvertedConditionList = [InvertedCondition]
 public struct InvertedCondition: ASTTokenizable {
     public let condition: Condition
 }
-

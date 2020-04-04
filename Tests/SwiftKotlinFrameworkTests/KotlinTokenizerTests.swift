@@ -35,9 +35,9 @@ extension KotlinTokenizerTests {
         let swiftURL = URL(fileURLWithPath: "\(path)/\(file).swift")
         let kotlinURL = URL(fileURLWithPath: "\(path)/\(file).kt")
 
-        let expected = try String(contentsOf: kotlinURL).trimmingCharacters(in: .whitespacesAndNewlines)
-        let translated = try kotlinTokenizer.translate(path: swiftURL).tokens?
-            .joinedValues().trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let expected = try String(contentsOf: kotlinURL).removingLineTrailingSpacing()
+        let translated = kotlinTokenizer.translate(path: swiftURL).tokens?
+            .joinedValues().removingLineTrailingSpacing() ?? ""
 
         if translated != expected {
             let difference = prettyFirstDifferenceBetweenStrings(translated, expected)
@@ -51,10 +51,28 @@ extension KotlinTokenizerTests {
     private var testFilePath: String {
         return URL(fileURLWithPath: #file)
             .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Assets")
             .appendingPathComponent("Tests")
             .appendingPathComponent("KotlinTokenizer")
             .path
     }
 }
 
+private extension String {
+    func removingLineTrailingSpacing() -> String {
+        return components(separatedBy: "\n")
+            .map { $0.trimmingLastIndentSpacing() }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
+    func trimmingLastIndentSpacing() -> String {
+        var view = self[...]
+        while view.last?.isWhitespace == true {
+            view = view.dropLast()
+        }
+        return String(view)
+    }
+}
